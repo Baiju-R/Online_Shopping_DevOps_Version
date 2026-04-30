@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: onlineshop-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: onlineshop
+  template:
+    metadata:
+      labels:
+        app: onlineshop
+    spec:
+      containers:
+      - name: onlineshop
+        image: onlineshop
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 80
