@@ -1,6 +1,6 @@
 <?php
 
-$servername = "mysql";   // ✅ Kubernetes service name
+$servername = "db";   // ✅ Kubernetes service name
 $username = "root";
 $password = "root";
 $db = "onlineshop";

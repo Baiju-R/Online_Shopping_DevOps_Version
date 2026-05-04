@@ -31,35 +31,7 @@ spec:
         - name: mysql-storage
           mountPath: /var/lib/mysql
 
-      initContainers:
-      - name: mysql-init
-        image: mysql:5.7
-        command:
-        - sh
-        - -c
-        - |
-          echo "Waiting for MySQL...";
-          until mysql -h mysql -u root -proot -e "SELECT 1"; do
-            sleep 3;
-          done;
-
-          echo "Checking tables...";
-          if ! mysql -h mysql -u root -proot onlineshop -e "SELECT * FROM products LIMIT 1"; then
-            echo "Importing database...";
-            mysql -h mysql -u root -proot onlineshop < /initdb/onlineshop.sql;
-          else
-            echo "Database already initialized.";
-          fi;
-
-        volumeMounts:
-        - name: mysql-initdb
-          mountPath: /initdb
-
       volumes:
       - name: mysql-storage
         persistentVolumeClaim:
           claimName: mysql-pvc
-
-      - name: mysql-initdb
-        configMap:
-          name: mysql-initdb-config
