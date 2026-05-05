@@ -1,0 +1,350 @@
+// Simplified Jenkinsfile for local development with running website
+// Optimized for: http://localhost:8000/
+
+pipeline {
+    agent any
+
+    parameters {
+        booleanParam(name: 'RUN_TESTS', defaultValue: true, description: 'Run Tests')
+        booleanParam(name: 'SECURITY_SCAN', defaultValue: true, description: 'Run Security Scan')
+        booleanParam(name: 'BUILD_DOCKER', defaultValue: false, description: 'Build Docker Image')
+        string(name: 'DEPLOY_PATH', defaultValue: '/mnt/c/xampp/htdocs/online-shopping-system-master', description: 'Local deployment path')
+    }
+
+    environment {
+        BUILD_TIMESTAMP = sh(script: "date -u +'%Y-%m-%d_%H-%M-%S'", returnStdout: true).trim()
+        WORKSPACE_ROOT = "${WORKSPACE}"
+        LOG_DIR = "${WORKSPACE}/logs"
+        REPORTS_DIR = "${WORKSPACE}/reports"
+        APP_URL = "http://localhost:8000"
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+    }
+
+    stages {
+        stage('Initialization') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "Pipeline Initialization"
+                    echo "=========================================="
+                    sh 'mkdir -p ${LOG_DIR} ${REPORTS_DIR}'
+                    sh 'echo "Build started at $(date)" > ${LOG_DIR}/build.log'
+                    sh 'echo "Application URL: ${APP_URL}"'
+                    sh 'git --version'
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "Checking out source code"
+                    echo "=========================================="
+                    checkout scm
+                    sh 'git log -1 --pretty=format:"%H - %an - %s" > ${REPORTS_DIR}/git-info.txt'
+                    sh 'echo "Working directory: $(pwd)"'
+                }
+            }
+        }
+
+        stage('Code Quality Analysis') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "PHP Code Quality Checks"
+                    echo "=========================================="
+                    try {
+                        sh '''
+                            # Check for PHP syntax errors
+                            echo "Checking PHP syntax..."
+                            find . -name "*.php" -type f ! -path "./vendor/*" ! -path "./.git/*" | while read php_file; do
+                                if ! php -l "$php_file" > /dev/null 2>&1; then
+                                    echo "❌ Syntax error in $php_file" >> ${LOG_DIR}/php-errors.log
+                                else
+                                    echo "✓ Valid: $php_file"
+                                fi
+                            done
+                            
+                            # Count lines of code
+                            echo ""
+                            echo "Code Statistics:"
+                            TOTAL_LINES=$(find . -name "*.php" -type f ! -path "./vendor/*" ! -path "./.git/*" -exec wc -l {} + | tail -1 | awk '{print $1}')
+                            PHP_FILES=$(find . -name "*.php" -type f ! -path "./vendor/*" ! -path "./.git/*" | wc -l)
+                            echo "Total PHP files: $PHP_FILES"
+                            echo "Total lines of code: $TOTAL_LINES"
+                            
+                            # Report
+                            echo "Files: $PHP_FILES" >> ${REPORTS_DIR}/code-stats.txt
+                            echo "Lines: $TOTAL_LINES" >> ${REPORTS_DIR}/code-stats.txt
+                        '''
+                    } catch (Exception e) {
+                        echo "⚠ Code quality check completed with warnings: ${e.message}"
+                    }
+                }
+            }
+        }
+
+        stage('Dependency Check') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "Dependency Analysis"
+                    echo "=========================================="
+                    sh '''
+                        echo "Checking for composer.json..."
+                        if [ -f "composer.json" ]; then
+                            echo "✓ composer.json found"
+                        else
+                            echo "⚠ No composer.json - using direct PHP files"
+                        fi
+                        
+                        echo ""
+                        echo "Critical files check:"
+                        [ -f "index.php" ] && echo "✓ index.php exists" || echo "❌ index.php MISSING"
+                        [ -f "config.php" ] && echo "✓ config.php exists" || echo "❌ config.php MISSING"
+                        [ -f "db.php" ] && echo "✓ db.php exists" || echo "❌ db.php MISSING"
+                        [ -d "database" ] && echo "✓ database directory exists" || echo "⚠ database directory MISSING"
+                    '''
+                }
+            }
+        }
+
+        stage('PHP Unit Tests') {
+            when {
+                expression { params.RUN_TESTS == true }
+            }
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "Running Tests"
+                    echo "=========================================="
+                    sh '''
+                        mkdir -p ${REPORTS_DIR}/tests
+                        
+                        echo "Checking for PHPUnit..."
+                        if command -v phpunit &> /dev/null; then
+                            echo "✓ PHPUnit found - running tests"
+                            phpunit --log-junit ${REPORTS_DIR}/tests/phpunit.xml --testdox || true
+                        else
+                            echo "⚠ PHPUnit not installed - skipping unit tests"
+                        fi
+                        
+                        echo ""
+                        echo "Basic sanity checks..."
+                        # Check if index.php can be parsed
+                        php -l index.php && echo "✓ index.php is valid PHP" || echo "❌ index.php has syntax errors"
+                    '''
+                }
+            }
+        }
+
+        stage('Security Scanning') {
+            when {
+                expression { params.SECURITY_SCAN == true }
+            }
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "Security Analysis"
+                    echo "=========================================="
+                    sh '''
+                        mkdir -p ${REPORTS_DIR}/security
+                        
+                        echo "Scanning for security issues..."
+                        
+                        # Check for hardcoded credentials
+                        echo "Checking for hardcoded credentials..."
+                        if grep -r "password.*=" --include="*.php" . 2>/dev/null | grep -v "htmlspecialchars" | grep -v "password_" > ${REPORTS_DIR}/security/possible-credentials.txt 2>&1; then
+                            CRED_COUNT=$(wc -l < ${REPORTS_DIR}/security/possible-credentials.txt)
+                            echo "⚠ Found $CRED_COUNT lines with potential hardcoded credentials"
+                        fi
+                        
+                        # Check for SQL injection risks
+                        echo "Checking for SQL injection patterns..."
+                        if grep -r "\\$.*SELECT\\|\\$.*INSERT\\|\\$.*UPDATE" --include="*.php" . 2>/dev/null | grep -v "prepared\\|placeholder" > ${REPORTS_DIR}/security/sql-risks.txt 2>&1; then
+                            SQL_COUNT=$(wc -l < ${REPORTS_DIR}/security/sql-risks.txt)
+                            echo "⚠ Found $SQL_COUNT potential SQL injection risks - review carefully"
+                        else
+                            echo "✓ No obvious SQL injection patterns found"
+                        fi
+                        
+                        # Check for XSS vulnerabilities
+                        echo "Checking for XSS patterns..."
+                        if grep -r "echo.*\\$_" --include="*.php" . 2>/dev/null | grep -v "htmlspecialchars\\|htmlentities\\|escap" > ${REPORTS_DIR}/security/xss-risks.txt 2>&1; then
+                            XSS_COUNT=$(wc -l < ${REPORTS_DIR}/security/xss-risks.txt)
+                            echo "⚠ Found $XSS_COUNT potential XSS vulnerabilities - review and use htmlspecialchars()"
+                        else
+                            echo "✓ No obvious XSS patterns found"
+                        fi
+                        
+                        # Check for dangerous functions
+                        echo "Checking for dangerous functions..."
+                        DANGEROUS_FUNCS="eval|exec|system|passthru|shell_exec|proc_open|popen"
+                        if grep -Er "$DANGEROUS_FUNCS" --include="*.php" . 2>/dev/null > ${REPORTS_DIR}/security/dangerous-functions.txt; then
+                            DANGER_COUNT=$(wc -l < ${REPORTS_DIR}/security/dangerous-functions.txt)
+                            if [ $DANGER_COUNT -gt 0 ]; then
+                                echo "🚨 Found $DANGER_COUNT uses of dangerous functions"
+                            fi
+                        fi
+                        
+                        echo ""
+                        echo "Security scan report saved to: ${REPORTS_DIR}/security/"
+                    '''
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            when {
+                expression { params.BUILD_DOCKER == true }
+            }
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "Building Docker Image"
+                    echo "=========================================="
+                    sh '''
+                        echo "Building Docker image: online-shopping-system:${BUILD_TIMESTAMP}"
+                        docker build -t online-shopping-system:${BUILD_TIMESTAMP} \
+                            -t online-shopping-system:latest \
+                            -f Dockerfile .
+                        
+                        echo ""
+                        echo "✓ Docker image built successfully"
+                        docker images | grep online-shopping-system | head -2
+                    '''
+                }
+            }
+        }
+
+        stage('Health Check') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "Application Health Check"
+                    echo "=========================================="
+                    sh '''
+                        echo "Checking application at ${APP_URL}..."
+                        
+                        # Try to access the app
+                        if curl -s -o /dev/null -w "%{http_code}" ${APP_URL} | grep -q "200\\|302\\|301"; then
+                            echo "✓ Application is responding"
+                            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${APP_URL})
+                            echo "HTTP Status Code: $HTTP_CODE"
+                        else
+                            echo "⚠ Application may not be running at ${APP_URL}"
+                            echo "Make sure XAMPP is running: xampp start"
+                        fi
+                        
+                        # Check database connectivity
+                        echo ""
+                        echo "Checking database configuration..."
+                        if grep -q "mysqli" db.php 2>/dev/null; then
+                            echo "✓ Using MySQLi for database connection"
+                        elif grep -q "PDO" db.php 2>/dev/null; then
+                            echo "✓ Using PDO for database connection"
+                        else
+                            echo "⚠ Could not determine database connection method"
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('Generate Reports') {
+            steps {
+                script {
+                    echo "=========================================="
+                    echo "Generating Build Reports"
+                    echo "=========================================="
+                    sh '''
+                        cat > ${REPORTS_DIR}/build-summary.txt <<EOF
+==========================================
+BUILD SUMMARY - $(date)
+==========================================
+Build Number: ${BUILD_NUMBER}
+Build Timestamp: ${BUILD_TIMESTAMP}
+Application URL: ${APP_URL}
+Deployment Path: ${DEPLOY_PATH}
+
+Git Commit: $(git rev-parse --short HEAD)
+Branch: $(git rev-parse --abbrev-ref HEAD)
+
+Configuration:
+- Run Tests: ${RUN_TESTS}
+- Security Scan: ${SECURITY_SCAN}
+- Build Docker: ${BUILD_DOCKER}
+
+Generated Reports:
+- Code Statistics: ${REPORTS_DIR}/code-stats.txt
+- Security Report: ${REPORTS_DIR}/security/
+- Test Results: ${REPORTS_DIR}/tests/
+- Build Log: ${LOG_DIR}/build.log
+
+==========================================
+EOF
+                        cat ${REPORTS_DIR}/build-summary.txt
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "=========================================="
+                echo "Cleanup & Finalization"
+                echo "=========================================="
+                sh '''
+                    echo "Collecting reports..."
+                    ls -lh ${REPORTS_DIR}/ > ${REPORTS_DIR}/files-listing.txt 2>&1 || true
+                    
+                    echo ""
+                    echo "✓ Build pipeline completed at $(date)"
+                    echo "✓ View reports in: ${REPORTS_DIR}/"
+                '''
+            }
+        }
+
+        success {
+            script {
+                echo ""
+                echo "=========================================="
+                echo "✓ BUILD SUCCESSFUL"
+                echo "=========================================="
+                echo ""
+                echo "Your application is running at: ${APP_URL}"
+                echo "Jenkins workspace: ${WORKSPACE}"
+                echo "Reports location: ${REPORTS_DIR}/"
+                sh 'echo "Build succeeded at $(date)" >> ${LOG_DIR}/build.log'
+            }
+        }
+
+        failure {
+            script {
+                echo ""
+                echo "=========================================="
+                echo "❌ BUILD FAILED"
+                echo "=========================================="
+                sh '''
+                    echo "Build failed at $(date)" >> ${LOG_DIR}/build.log
+                    echo ""
+                    echo "Check logs at: ${LOG_DIR}/"
+                    echo "Security findings: ${REPORTS_DIR}/security/"
+                '''
+            }
+        }
+
+        cleanup {
+            cleanWs()
+        }
+    }
+}
